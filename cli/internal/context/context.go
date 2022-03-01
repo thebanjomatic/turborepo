@@ -276,16 +276,13 @@ func (c *Context) ResolveWorkspaceRootDeps(rootPackageJSON *fs.PackageJSON) erro
 	pkg := rootPackageJSON
 	depSet := mapset.NewSet()
 	pkg.UnresolvedExternalDeps = make(map[string]string)
-	for dep, version := range pkg.Dependencies {
-		pkg.UnresolvedExternalDeps[dep] = version
-	}
 	for dep, version := range pkg.DevDependencies {
 		pkg.UnresolvedExternalDeps[dep] = version
 	}
 	for dep, version := range pkg.OptionalDependencies {
 		pkg.UnresolvedExternalDeps[dep] = version
 	}
-	for dep, version := range pkg.PeerDependencies {
+	for dep, version := range pkg.Dependencies {
 		pkg.UnresolvedExternalDeps[dep] = version
 	}
 	if util.IsYarn(c.Backend.Name) {
@@ -345,10 +342,6 @@ func (c *Context) populateTopologicGraphForPackageJson(pkg *fs.PackageJSON) erro
 	externalDepSet := mapset.NewSet()
 	pkg.UnresolvedExternalDeps = make(map[string]string)
 
-	for dep, version := range pkg.Dependencies {
-		depMap[dep] = version
-	}
-
 	for dep, version := range pkg.DevDependencies {
 		depMap[dep] = version
 	}
@@ -357,7 +350,7 @@ func (c *Context) populateTopologicGraphForPackageJson(pkg *fs.PackageJSON) erro
 		depMap[dep] = version
 	}
 
-	for dep, version := range pkg.PeerDependencies {
+	for dep, version := range pkg.Dependencies {
 		depMap[dep] = version
 	}
 
@@ -368,7 +361,7 @@ func (c *Context) populateTopologicGraphForPackageJson(pkg *fs.PackageJSON) erro
 		if err != nil {
 			return err
 		}
-			
+
 		if isInternal {
 			internalDepsSet.Add(dependencyName)
 			c.TopologicalGraph.Connect(dag.BasicEdge(pkg.Name, dependencyName))
@@ -379,15 +372,15 @@ func (c *Context) populateTopologicGraphForPackageJson(pkg *fs.PackageJSON) erro
 
 	for _, name := range externalUnresolvedDepsSet.List() {
 		name := name.(string)
-		if item, ok := pkg.Dependencies[name]; ok {
-			pkg.UnresolvedExternalDeps[name] = item
-		}
-
 		if item, ok := pkg.DevDependencies[name]; ok {
 			pkg.UnresolvedExternalDeps[name] = item
 		}
 
 		if item, ok := pkg.OptionalDependencies[name]; ok {
+			pkg.UnresolvedExternalDeps[name] = item
+		}
+
+		if item, ok := pkg.Dependencies[name]; ok {
 			pkg.UnresolvedExternalDeps[name] = item
 		}
 	}
