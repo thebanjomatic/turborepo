@@ -18,6 +18,7 @@ import (
 	"github.com/vercel/turborepo/cli/internal/globby"
 	"github.com/vercel/turborepo/cli/internal/util"
 
+	"github.com/Masterminds/semver"
 	mapset "github.com/deckarep/golang-set"
 	"github.com/pyr-sh/dag"
 	gitignore "github.com/sabhiram/go-gitignore"
@@ -55,6 +56,61 @@ func New(opts ...Option) (*Context, error) {
 	}
 
 	return &m, nil
+}
+
+func ParseDependencyProtocol(version string) (string, string) {
+	parts := strings.Split(version, ":")
+	if len(parts) == 1 {
+		return "", parts[0]
+	}
+
+	return parts[0], strings.Join(parts[1:], ":")
+}
+
+func IsProtocolExternal(protocol string) bool {
+	// The npm protocol for yarn by default still uses the workspace package if the workspace
+	// version is in a compatible semver range. See https://github.com/yarnpkg/berry/discussions/4015
+	// For now, we will just assume if the npm protocol is being used and the version matches
+	// its an internal dependency which matches the existing behavior before this additional
+	// logic was added.
+
+	// TODO: extend this to support the `enableTransparentWorkspaces` yarn option
+	return protocol != "" && protocol != "npm"
+}
+
+func IsReferenceToLocalPackage(packageInfos map[interface{}]*fs.PackageJSON, dependencyName, dependencyVersion string) (bool, error) {
+	pkg, localPackageFound := packageInfos[dependencyName]
+
+	if !localPackageFound {
+		return false, nil
+	}
+
+	protocol, dependencyVersion := ParseDependencyProtocol(dependencyVersion)
+
+	if protocol == "workspace" {
+		// TODO: Since support at the moment is non-existent for workspaces that contain multiple
+		// versions of the same package name, just assume its a match and don't check the range
+		// for an exact match.
+		return true, nil
+	} else if IsProtocolExternal(protocol) {
+		// Other protocols are assumed to be external references ("git:", "npm:", etc)
+		return false, nil
+	}
+
+	// If we got this far, then we need to check the workspace package version to see it satisfies
+	// the dependencies range to determin whether or not its an internal or external dependency.
+
+	constraint, err := semver.NewConstraint(dependencyVersion)
+	if err != nil {
+		return false, fmt.Errorf("Unable to parse semver constraint: %w", err)
+	}
+
+	pkgVersion, err := semver.NewVersion(pkg.Version)
+	if err != nil {
+		return false, err
+	}
+
+	return constraint.Check(pkgVersion), nil
 }
 
 func WithGraph(rootpath string, config *config.Config) Option {
@@ -283,35 +339,44 @@ func GetTargetsFromArguments(arguments []string, configJson *fs.TurboConfigJSON)
 func (c *Context) populateTopologicGraphForPackageJson(pkg *fs.PackageJSON) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
+	depMap := make(map[string]string)
 	internalDepsSet := make(dag.Set)
-	depSet := make(dag.Set)
+	externalUnresolvedDepsSet := make(dag.Set)
 	externalDepSet := mapset.NewSet()
 	pkg.UnresolvedExternalDeps = make(map[string]string)
-	for dep := range pkg.Dependencies {
-		depSet.Add(dep)
+
+	for dep, version := range pkg.Dependencies {
+		depMap[dep] = version
 	}
 
-	for dep := range pkg.DevDependencies {
-		depSet.Add(dep)
+	for dep, version := range pkg.DevDependencies {
+		depMap[dep] = version
 	}
 
-	for dep := range pkg.OptionalDependencies {
-		depSet.Add(dep)
+	for dep, version := range pkg.OptionalDependencies {
+		depMap[dep] = version
 	}
 
-	for dep := range pkg.PeerDependencies {
-		depSet.Add(dep)
+	for dep, version := range pkg.PeerDependencies {
+		depMap[dep] = version
 	}
 
 	// split out internal vs. external deps
-	for _, dependencyName := range depSet.List() {
-		if item, ok := c.PackageInfos[dependencyName]; ok {
-			internalDepsSet.Add(item.Name)
+	for dependencyName, version := range depMap {
+		isInternal, err := IsReferenceToLocalPackage(c.PackageInfos, dependencyName, version)
+
+		if err != nil {
+			return err
+		}
+			
+		if isInternal {
+			internalDepsSet.Add(dependencyName)
 			c.TopologicalGraph.Connect(dag.BasicEdge(pkg.Name, dependencyName))
+		} else {
+			externalUnresolvedDepsSet.Add(dependencyName)
 		}
 	}
 
-	externalUnresolvedDepsSet := depSet.Difference(internalDepsSet)
 	for _, name := range externalUnresolvedDepsSet.List() {
 		name := name.(string)
 		if item, ok := pkg.Dependencies[name]; ok {
